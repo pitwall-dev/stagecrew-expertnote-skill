@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create or update one StageCrew Expert Note from Markdown using only the stdlib."""
+"""Create or update one StageCrew Expert Note from Markdown or HTML using only the stdlib."""
 
 import argparse
 import json
@@ -76,12 +76,17 @@ def main() -> None:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--content")
     source.add_argument("--content-file", type=Path)
+    parser.add_argument("--content-format", choices=("markdown", "html"), default="markdown")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     name = args.name.strip()
     try:
-        content = args.content_file.read_text(encoding="utf-8") if args.content_file else args.content
+        if args.content_file:
+            with args.content_file.open("r", encoding="utf-8", newline="") as content_stream:
+                content = content_stream.read()
+        else:
+            content = args.content
     except OSError as error:
         abort(f"Cannot read content file: {error}")
     if not 1 <= len(name) <= 512:
@@ -90,7 +95,11 @@ def main() -> None:
         abort("content must contain 1-100000 characters")
     if args.id and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", args.id):
         abort("id must be a generated Expert Note id")
-    payload = {"name": name, "content": content} | ({"id": args.id} if args.id else {})
+    payload = (
+        {"name": name, "content": content}
+        | ({"contentFormat": "html"} if args.content_format == "html" else {})
+        | ({"id": args.id} if args.id else {})
+    )
     if args.dry_run:
         print(json.dumps({
             "valid": True,

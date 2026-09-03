@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import tempfile
 import threading
 import unittest
 import urllib.request
@@ -114,6 +115,64 @@ class CreateExpertNoteTest(unittest.TestCase):
         self.assertEqual(json.loads(run.stdout), {"status": 200, "id": "note-123", "logTracingId": "trace-456"})
         self.assertEqual(handler.seen[0]["method"], "PUT")
         self.assertEqual(handler.seen[0]["body"], {"id": "note-123", "name": "Updated", "content": "New report"})
+
+    def test_preserves_html_and_sends_its_content_format(self):
+        source = "<!doctype html><html><head><style>body{color:red}</style></head><body>Report</body></html>"
+        server, handler = start_server()
+        try:
+            run = self.run_cli(
+                "--name", "HTML report", "--content-format", "html", "--content", source,
+                url=f"http://127.0.0.1:{server.server_port}/rest/expert-notes",
+            )
+        finally:
+            stop_server(server)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(handler.seen[0]["body"], {
+            "name": "HTML report", "content": source, "contentFormat": "html",
+        })
+
+    def test_updates_with_html_content_format(self):
+        source = "<!doctype html><html><body><script>console.log('ready')</script></body></html>"
+        server, handler = start_server(
+            response_status=200,
+            response_body={"data": {"id": "note-123"}, "logTracingId": "trace-456"},
+        )
+        try:
+            run = self.run_cli(
+                "--id", "note-123", "--name", "Updated HTML", "--content-format", "html", "--content", source,
+                url=f"http://127.0.0.1:{server.server_port}/rest/expert-notes",
+            )
+        finally:
+            stop_server(server)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(handler.seen[0]["method"], "PUT")
+        self.assertEqual(handler.seen[0]["body"], {
+            "id": "note-123", "name": "Updated HTML", "content": source, "contentFormat": "html",
+        })
+
+    def test_html_file_preserves_crlf_for_create_and_update(self):
+        source = "<!doctype html>\r\n<html>\r\n<body>Report</body>\r\n</html>\r\n"
+        with tempfile.TemporaryDirectory() as directory:
+            content_file = Path(directory) / "report.html"
+            content_file.write_bytes(source.encode())
+            for note_id, expected_status in ((None, 201), ("note-123", 200)):
+                with self.subTest(operation="update" if note_id else "create"):
+                    server, handler = start_server(
+                        response_status=expected_status,
+                        response_body={"data": {"id": "note-123"}, "logTracingId": "trace-456"},
+                    )
+                    args = ["--name", "HTML file", "--content-format", "html", "--content-file", str(content_file)]
+                    if note_id:
+                        args[:0] = ["--id", note_id]
+                    try:
+                        run = self.run_cli(
+                            *args,
+                            url=f"http://127.0.0.1:{server.server_port}/rest/expert-notes",
+                        )
+                    finally:
+                        stop_server(server)
+                    self.assertEqual(run.returncode, 0, run.stderr)
+                    self.assertEqual(handler.seen[0]["body"]["content"], source)
 
     def test_redirect_is_rejected_and_pat_does_not_reach_destination(self):
         destination, destination_handler = start_server()
