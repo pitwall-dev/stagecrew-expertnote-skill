@@ -1,6 +1,6 @@
 # StageCrew Expert Note Skill
 
-A distributable [Hermes Agent](https://github.com/NousResearch/hermes-agent) skill for creating and updating StageCrew Expert Notes from Markdown through the authenticated REST API.
+A distributable [Hermes Agent](https://github.com/NousResearch/hermes-agent) skill for creating and updating StageCrew Expert Notes from Markdown or self-contained HTML through the authenticated REST API.
 
 ## Install
 
@@ -51,6 +51,16 @@ To exercise local input validation without creating a note, resolve the installe
 python3 <installed-skill-directory>/scripts/create_expert_note.py \
   --name "Installation check" \
   --content "# Installation check" \
+  --dry-run
+```
+
+To validate self-contained HTML without changing its source, add `--content-format html`:
+
+```bash
+python3 <installed-skill-directory>/scripts/create_expert_note.py \
+  --name "HTML report" \
+  --content-format html \
+  --content-file "${TMPDIR:-/tmp}/report.html" \
   --dry-run
 ```
 
