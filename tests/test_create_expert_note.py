@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -69,13 +70,17 @@ def stop_server(server):
 
 
 class CreateExpertNoteTest(unittest.TestCase):
-    def run_cli(self, *args, url=None):
+    def run_cli(self, *args, url=None, bearer=None):
         env = os.environ | {
             "EXPERT_NOTE_API_URL": url or "http://127.0.0.1:1/rest/expert-notes",
             "EXPERT_NOTE_PAT": "sc_pat_test_secret",
         }
+        if bearer is not None:
+            env["EXPERT_NOTE_FIREBASE_BEARER"] = bearer
+        else:
+            env.pop("EXPERT_NOTE_FIREBASE_BEARER", None)
         return subprocess.run(
-            ["python3", str(SCRIPT), *args],
+            [sys.executable, str(SCRIPT), *args],
             env=env,
             text=True,
             capture_output=True,
@@ -255,6 +260,102 @@ class CreateExpertNoteTest(unittest.TestCase):
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("Cannot read content file", run.stderr)
         self.assertNotIn("Traceback", run.stderr)
+
+    def test_writer_posts_exact_ordered_blocks_with_firebase_bearer(self):
+        body = {"name": "Accepted note", "writer": {"sessionId": "session-1", "revision": 4,
+            "operationId": "operation-1", "blocks": [
+                {"type": "text", "content": "<h2>Step</h2>", "contentFormat": "html"},
+                {"type": "image", "stepId": "step-1"},
+                {"type": "text", "content": "After image"},
+            ]}}
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory) / "writer.json"
+            file.write_text(json.dumps(body), encoding="utf-8")
+            server, handler = start_server()
+            try:
+                run = self.run_cli("--writer-document-file", str(file), bearer="firebase-secret",
+                    url=f"http://127.0.0.1:{server.server_port}/rest/expert-notes")
+            finally:
+                stop_server(server)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(json.loads(run.stdout), {"status": 201, "id": "note-123", "logTracingId": "trace-456"})
+        self.assertEqual(handler.seen, [{"authorization": "Bearer firebase-secret", "method": "POST", "body": body}])
+        self.assertNotIn("firebase-secret", run.stdout + run.stderr)
+
+    def test_writer_dry_run_needs_no_auth_and_does_not_print_body(self):
+        body = {"name": "Private title", "writer": {"sessionId": "session-1", "revision": 0,
+            "operationId": "op-1", "blocks": [{"type": "image", "stepId": "step-1"}]}}
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory) / "writer.json"
+            file.write_text(json.dumps(body), encoding="utf-8")
+            with mock.patch.dict(os.environ, {}, clear=True):
+                run = self.run_cli("--writer-document-file", str(file), "--dry-run", bearer="")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(json.loads(run.stdout)["operation"], "writer-create")
+        self.assertNotIn("Private title", run.stdout)
+
+    def test_writer_rejects_malformed_documents_and_legacy_flags(self):
+        good = {"name": "Note", "writer": {"sessionId": "session-1", "revision": 1,
+            "operationId": "op-1", "blocks": [{"type": "image", "stepId": "step-1"}]}}
+        bad = [good | {"content": "not writer"},
+            good | {"writer": good["writer"] | {"revision": True}},
+            good | {"writer": good["writer"] | {"blocks": [{"type": "image", "stepId": "../image"}]}},
+            good | {"writer": good["writer"] | {"blocks": [{"type": "text", "content": ""}]}},
+            good | {"writer": good["writer"] | {"blocks": [{"type": "text", "content": "A", "contentFormat": "markdown"}]}},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory) / "writer.json"
+            for body in bad:
+                with self.subTest(body=body):
+                    file.write_text(json.dumps(body), encoding="utf-8")
+                    run = self.run_cli("--writer-document-file", str(file), "--dry-run")
+                    self.assertNotEqual(run.returncode, 0)
+                    self.assertIn("Invalid Writer", run.stderr)
+                    self.assertNotIn("Traceback", run.stderr)
+            file.write_text(json.dumps(good), encoding="utf-8")
+            run = self.run_cli("--writer-document-file", str(file), "--id", "note-1", "--dry-run")
+            self.assertNotEqual(run.returncode, 0)
+
+    def test_writer_requires_firebase_bearer_not_pat(self):
+        body = {"name": "Note", "writer": {"sessionId": "session-1", "revision": 1,
+            "operationId": "op-1", "blocks": [{"type": "image", "stepId": "step-1"}]}}
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory) / "writer.json"
+            file.write_text(json.dumps(body), encoding="utf-8")
+            run = self.run_cli("--writer-document-file", str(file))
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("EXPERT_NOTE_FIREBASE_BEARER", run.stderr)
+        self.assertNotIn("sc_pat_test_secret", run.stdout + run.stderr)
+
+    def test_writer_redacts_bearer_from_api_errors(self):
+        body = {"name": "Note", "writer": {"sessionId": "session-1", "revision": 1,
+            "operationId": "op-1", "blocks": [{"type": "image", "stepId": "step-1"}]}}
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory) / "writer.json"
+            file.write_text(json.dumps(body), encoding="utf-8")
+            server, _ = start_server(response_status=403, response_body={"error": "firebase-secret"})
+            try:
+                run = self.run_cli("--writer-document-file", str(file), bearer="firebase-secret",
+                    url=f"http://127.0.0.1:{server.server_port}/rest/expert-notes")
+            finally:
+                stop_server(server)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertNotIn("firebase-secret", run.stdout + run.stderr)
+        self.assertIn("403", run.stderr)
+
+    def test_writer_does_not_echo_bearer_from_success_response(self):
+        body = {"name": "Note", "writer": {"sessionId": "session-1", "revision": 1,
+            "operationId": "op-1", "blocks": [{"type": "image", "stepId": "step-1"}]}}
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory) / "writer.json"
+            file.write_text(json.dumps(body), encoding="utf-8")
+            server, _ = start_server(response_body={"data": {"id": "note-123"}, "logTracingId": "firebase-secret"})
+            try:
+                run = self.run_cli("--writer-document-file", str(file), bearer="firebase-secret",
+                    url=f"http://127.0.0.1:{server.server_port}/rest/expert-notes")
+            finally:
+                stop_server(server)
+        self.assertNotIn("firebase-secret", run.stdout + run.stderr)
 
 
 if __name__ == "__main__":

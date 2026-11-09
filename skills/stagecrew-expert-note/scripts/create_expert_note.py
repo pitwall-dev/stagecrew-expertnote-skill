@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create or update one StageCrew Expert Note from Markdown or HTML using only the stdlib."""
+"""Create or update text notes, or POST a native-image Writer note, using only stdlib."""
 
 import argparse
 import json
@@ -33,7 +33,7 @@ def validate_api_url(url: str) -> str:
     return url
 
 
-def read_json(request: urllib.request.Request) -> tuple[int, dict]:
+def read_json(request: urllib.request.Request, secret: str = "") -> tuple[int, dict]:
     try:
         opener = urllib.request.build_opener(NoRedirect())
         with opener.open(request, timeout=30) as response:
@@ -56,10 +56,12 @@ def read_json(request: urllib.request.Request) -> tuple[int, dict]:
             detail = json.loads(body)
         except json.JSONDecodeError:
             detail = body[:500]
-        abort(json.dumps({"status": error.code, "error": detail}, ensure_ascii=False))
+        message = json.dumps({"status": error.code, "error": detail}, ensure_ascii=False)
+        abort(message.replace(secret, "[REDACTED]") if secret else message)
     except (urllib.error.URLError, TimeoutError, ConnectionResetError, OSError) as error:
         reason = getattr(error, "reason", error)
-        abort(f"Network error: {reason}; write status is unknown, do not retry automatically")
+        message = f"Network error: {reason}; write status is unknown, do not retry automatically"
+        abort(message.replace(secret, "[REDACTED]") if secret else message)
 
 
 def personal_access_token() -> str:
@@ -68,17 +70,75 @@ def personal_access_token() -> str:
         abort("Set EXPERT_NOTE_PAT to a StageCrew personal access token")
     return token
 
+def writer_document(path: Path) -> dict:
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            body = json.load(stream)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        abort("Cannot read valid Writer JSON file")
+    identifier = lambda value: isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value)
+    if not isinstance(body, dict) or set(body) != {"name", "writer"} or not isinstance(body["name"], str) or not 1 <= len(body["name"]) <= 512 or not body["name"].strip():
+        abort("Invalid Writer document")
+    writer = body["writer"]
+    if not isinstance(writer, dict) or set(writer) != {"sessionId", "revision", "operationId", "blocks"} or not identifier(writer["sessionId"]) or not identifier(writer["operationId"]) or type(writer["revision"]) is not int or writer["revision"] < 0 or not isinstance(writer["blocks"], list) or not 1 <= len(writer["blocks"]) <= 100:
+        abort("Invalid Writer document")
+    text_size = 0
+    for block in writer["blocks"]:
+        if not isinstance(block, dict):
+            abort("Invalid Writer block")
+        if block.get("type") == "image":
+            if set(block) != {"type", "stepId"} or not identifier(block["stepId"]):
+                abort("Invalid Writer image block")
+        elif block.get("type") == "text":
+            if set(block) not in ({"type", "content"}, {"type", "content", "contentFormat"}) or not isinstance(block["content"], str) or not 1 <= len(block["content"]) <= 100_000 or ("contentFormat" in block and block["contentFormat"] != "html"):
+                abort("Invalid Writer text block")
+            text_size += len(block["content"])
+        else:
+            abort("Invalid Writer block type")
+    if text_size > 100_000:
+        abort("Writer document exceeds text limits")
+    return body
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--id", help="update this existing Expert Note instead of creating one")
-    parser.add_argument("--name", required=True)
+    parser.add_argument("--name")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--content")
     source.add_argument("--content-file", type=Path)
+    source.add_argument("--writer-document-file", type=Path)
     parser.add_argument("--content-format", choices=("markdown", "html"), default="markdown")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+
+    if args.writer_document_file:
+        if args.id or args.name or args.content_format != "markdown":
+            parser.error("Writer document cannot be combined with legacy note options")
+        payload = writer_document(args.writer_document_file)
+        if args.dry_run:
+            print(json.dumps({"valid": True, "operation": "writer-create", "blockCount": len(payload["writer"]["blocks"])}))
+            return
+        url = os.getenv("EXPERT_NOTE_API_URL")
+        if not url:
+            abort("Set EXPERT_NOTE_API_URL")
+        bearer = os.getenv("EXPERT_NOTE_FIREBASE_BEARER", "")
+        if not bearer or bearer.startswith("sc_pat_") or "\n" in bearer or "\r" in bearer:
+            abort("Set EXPERT_NOTE_FIREBASE_BEARER to a per-request Firebase ID token (not a PAT)")
+        request = urllib.request.Request(validate_api_url(url), data=json.dumps(payload).encode(),
+            headers={"Authorization": f"Bearer {bearer}", "Content-Type": "application/json"}, method="POST")
+        status, result = read_json(request, bearer)
+        if bearer in json.dumps(result):
+            abort("Response contained a credential; write status is unknown, do not retry automatically")
+        data = result.get("data")
+        note_id = data.get("id") if isinstance(data, dict) else None
+        if status != 201 or not isinstance(note_id, str) or not note_id.strip():
+            abort(json.dumps({"status": status, "error": "response did not contain data.id"}))
+        print(json.dumps({"status": status, "id": note_id, "logTracingId": result.get("logTracingId")}, ensure_ascii=False))
+        return
+
+    if args.name is None:
+        parser.error("--name is required for text notes")
 
     name = args.name.strip()
     try:
