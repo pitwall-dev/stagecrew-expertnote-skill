@@ -1,7 +1,7 @@
 ---
 name: stagecrew-expert-note
-description: "Create or update StageCrew Expert Notes from Markdown or self-contained HTML through the authenticated REST API; use when the user asks to register, save, publish, or replace an issue report in Expert Note."
-version: 1.3.0
+description: "Create or update StageCrew Expert Notes from Markdown/HTML; use the private Writer save tool for accepted video documents with native images."
+version: 1.4.0
 author: Pitwall
 license: MIT
 platforms: [linux, macos]
@@ -55,6 +55,12 @@ python3 scripts/create_expert_note.py --name "<title>" --content-format html --c
 ```
 
 HTML is stored unchanged and rendered inside the Expert Note sandbox. Viewing it requires the organization's HTML-document feature to be enabled.
+
+## Private video Writer workflow
+
+A video Writer document is **not** a Markdown/HTML report submitted through this skill's personal-PAT REST client. After the requester reviews the generated preview and explicitly applies it, the authenticated Writer's `formatVersion` action asks its pinned Hermes Agent to call the dedicated `stagecrew_writer_commit_format` tool. This tool is scoped to that accepted session, requester, revision and original-image assets; the server creates the private native-image Expert Note and its version in one Firestore transaction (image blobs are copied beforehand). The model may format the already accepted text, but may not change its words, step order, owner or image paths. The private Writer never receives `EXPERT_NOTE_PAT`.
+
+Do not run `scripts/create_expert_note.py` against a Writer session, or try to encode native images as Markdown links, standalone HTML or an unimplemented `document` REST field. If the tool fails or its response is ambiguous, read back the same Writer session/version before reporting success or considering a new operation; do not automatically rerun paid work. Existing report create/update through the PAT REST API continues below.
 
 ## Update workflow
 
