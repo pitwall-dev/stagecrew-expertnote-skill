@@ -1,6 +1,6 @@
 # StageCrew Expert Note Skill
 
-A distributable [Hermes Agent](https://github.com/NousResearch/hermes-agent) skill for creating and updating StageCrew Expert Notes from Markdown or self-contained HTML through the authenticated REST API.
+A distributable [Hermes Agent](https://github.com/NousResearch/hermes-agent) skill for creating/updating Markdown or HTML Expert Notes and creating native-image Writer notes through the REST API.
 
 ## Install
 
@@ -28,7 +28,7 @@ Find the active profile's environment file:
 hermes config env-path
 ```
 
-Add the following values to that file. Never commit the actual PAT.
+Set the endpoint in that file. For standalone text notes, also set a personal access token; never commit the actual PAT.
 
 ```dotenv
 EXPERT_NOTE_API_URL=https://api-dev.pitwall-web.jp/rest/expert-notes
@@ -36,6 +36,21 @@ EXPERT_NOTE_PAT=sc_pat_...
 ```
 
 Create the PAT in StageCrew under **Manage my account → Personal access tokens**. It must have the `expertNotes:create` scope.
+
+For Writer native-image creation, use a **per-request requester Firebase ID token**, not the PAT. The trusted host can pass it in `EXPERT_NOTE_FIREBASE_BEARER` to the CLI without placing it in a command line or JSON file. If Hermes can read that environment, the trusted host must POST the authored JSON itself instead. Do not persist a Writer bearer in the profile `.env`.
+
+Writer request file example (private, no token):
+
+```json
+{"name":"Accepted title","writer":{"sessionId":"session-1","revision":4,"operationId":"commit-1","blocks":[{"type":"text","content":"## Step"},{"type":"image","stepId":"step-1"}]}}
+```
+
+```bash
+python3 <installed-skill-directory>/scripts/create_expert_note.py --writer-document-file <private-json-path> --dry-run
+python3 <installed-skill-directory>/scripts/create_expert_note.py --writer-document-file <private-json-path>
+```
+
+The second command requires the trusted per-request bearer environment; it POSTs to `/rest/expert-notes`, expects HTTP 201 plus `data.id`, and never substitutes a Markdown image link for a native image. Preserve the accepted revision, text and step order, and stable operation ID. On an ambiguous write, inspect the Writer session/version before retrying.
 
 ## Verify the package and installation
 
@@ -78,13 +93,13 @@ skills/stagecrew-expert-note/
 Run the test suite with the Python standard library only:
 
 ```bash
-python3 -m unittest discover -s tests -p 'test_*.py' -v
+python3.11 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
 ## Security
 
-- Treat `EXPERT_NOTE_PAT` as a password.
-- Never paste the PAT into chat, logs, source files, or issue reports.
+- Treat `EXPERT_NOTE_PAT` and `EXPERT_NOTE_FIREBASE_BEARER` as passwords.
+- Never paste credentials into chat, logs, source files, or issue reports.
 - Use HTTPS for non-local endpoints. The client rejects non-loopback HTTP and refuses redirects so the PAT cannot be forwarded to another origin.
 - Do not automatically retry an ambiguous write timeout because the first request may have succeeded.
 
